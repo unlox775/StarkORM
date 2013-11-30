@@ -1,0 +1,12 @@
+== StarkORM ==
+
+=== Why Another ORM? ===
+
+Todo.
+
+=== Todo ===
+
+# Write these docs
+# Build documentation Website
+# Make examples pages
+# Help the universe.

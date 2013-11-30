@@ -1,4 +1,0 @@
-StarkORM
-========
-
-StarkORM
