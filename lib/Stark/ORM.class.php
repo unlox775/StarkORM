@@ -295,7 +295,7 @@ class Stark__ORM {
      * @param mixed $pk_value            Either an array of values representing the primary key for this object, or a single non-array value if the PKey is only 1 column (or an empty array for a pseudo object)
      * @param mixed $select_star_data    If you got the PKey from a SQL query you just ran and you also got the full "select * from ..." for that table row, just pass that (assoc) array here and it'll save SimplORM from having to re-query the data
      */
-    public function __construct($pk_value = array(), $select_star_data = null, $sync_dbh = null) {
+    public function __construct($pk_value = array(), $select_star_data = null, $sync_dbh = null,$sync_select_dbh = null) {
 
         ###  Handle one or an array or PK values
         if ( is_array( $pk_value ) ) {
@@ -306,6 +306,9 @@ class Stark__ORM {
 		###  For when you KNOW the DBH ID, like for internal object creation...
         if ( is_int( $sync_dbh ) ) {
             $this->__dbh = $sync_dbh;
+        }
+        if ( is_int( $sync_select_dbh ) ) {
+            $this->__select_dbh = $sync_select_dbh;
         }
 
         ###  Reference a cached object if available (skip caching if any of the PK values are NULL)
@@ -319,7 +322,7 @@ class Stark__ORM {
 			###    will be guaranteed to be an object_forward child
 			$this->opt_mode_preload(func_get_args());
 
-			if ( Stark__ORM::$__global_opt_mode != 'n' && isset(self::$__OBJECT_CACHE[ $this->__dbh ][ $this->__cache_key ]) ) {
+			if ( self::$__global_opt_mode != 'n' && isset(self::$__OBJECT_CACHE[ $this->__dbh ][ $this->__cache_key ]) ) {
                 $this->__object_forward = true;
 #				bug("USING CACHE: ".$this->__cache_key);
             
@@ -328,8 +331,8 @@ class Stark__ORM {
 				$this->__opt_mode = self::$__OBJECT_CACHE[ $this->__dbh ][$this->__cache_key]->__opt_mode;
             }
             else {
-				if ( Stark__ORM::$__global_opt_mode != 'n' ) self::$__OBJECT_CACHE[ $this->__dbh ][$this->__cache_key] = $this;
-				$this->__opt_mode = Stark__ORM::$__global_opt_mode;
+				if ( self::$__global_opt_mode != 'n' ) self::$__OBJECT_CACHE[ $this->__dbh ][$this->__cache_key] = $this;
+				$this->__opt_mode = self::$__global_opt_mode;
 			}
 
 			if ( $this->__opt_mode == 'm' && $this->__object_forward !== null ) @self::$__OBJECT_REFCOUNT[ $this->__dbh ][$this->__cache_key]++;
@@ -340,7 +343,8 @@ class Stark__ORM {
         ###  Allow them to supply a "SELECT * " output for this row if they already had it...
         if ( $this->__object_forward === null && is_array( $select_star_data ) ) {
             ###  For now, just trust it...  Maybe later we'll make it check that all the cols are present...
-            $this->__data = $select_star_data;
+            ###  SPH -- Or for the moment we'll just make sure we only add data defined in the schema
+            $this->__data = array_intersect_key($select_star_data, $this->__schema);
         }
     }
 
@@ -392,20 +396,20 @@ class Stark__ORM {
 	 */
 	public static function optimization_mode($mode = null) {
 		if ( ! is_null( $mode ) )
-			Stark__ORM::$__global_opt_mode = substr($mode, 0, 1);
-		return Stark__ORM::$__global_opt_mode;
+			self::$__global_opt_mode = substr($mode, 0, 1);
+		return self::$__global_opt_mode;
 	}
 
 	private function opt_mode_preload($args) {
 		$class = get_class($this);
 		###  Avoid infinite loops on the same __construct()
-		if ( Stark__ORM::$__global_opt_mode != 'm'
+		if ( self::$__global_opt_mode != 'm'
 			 || isset(self::$__OBJECT_CACHE[ $this->__dbh ][ $this->__cache_key ])
-			 || ( ! empty( Stark__ORM::$__opt_mode_getting_parent ) && isset( Stark__ORM::$__opt_mode_getting_parent[ $this->__cache_key ] )
+			 || ( ! empty( self::$__opt_mode_getting_parent ) && isset( self::$__opt_mode_getting_parent[ $this->__cache_key ] )
 				  ) ) return false;
 
 		###  Since call_user_func_array() doesn't handle "new Object()", then we have to be sneaky...
-		Stark__ORM::$__opt_mode_getting_parent[ $this->__cache_key ] = true;
+		self::$__opt_mode_getting_parent[ $this->__cache_key ] = true;
 		switch (count($args)) {
 		    case 0: $obj = new $class(); break;
 		    case 1: $obj = new $class($args[0]); break;
@@ -414,7 +418,7 @@ class Stark__ORM {
 		    case 4: $obj = new $class($args[0],$args[1],$args[2],$args[3]); break;
 		}
 		###  That should have cached the object in the ORM cache, so the caller __construct() will be an object_forward
-		unset( Stark__ORM::$__opt_mode_getting_parent[ $this->__cache_key ] );
+		unset( self::$__opt_mode_getting_parent[ $this->__cache_key ] );
 	}
 
     ///  Wait as late as possible to get the DBH...
@@ -435,7 +439,26 @@ class Stark__ORM {
         }
     }
 
+    ///  Wait as late as possible to get the DBH...
+    protected function load_select_dbh() {
+        ###  Get the database handle
+        if ( is_null( $this->__select_dbh ) ) {
+			///  Default value
+            $this->__select_dbh = count(self::$__DBH_CACHE);
+
+			///  Now, see if this object is already in the cache...
+			$dbh_obj = $this->provide_dbh();
+			foreach ( self::$__DBH_CACHE as $i => $this_dbh_obj ) {
+				if ( $this_dbh_obj === $dbh_obj ) { $this->__select_dbh = $i; break; }
+			}
+
+            self::$__DBH_CACHE[ $this->__select_dbh ] = $dbh_obj;
+            $this->__dbh_type                               = $this->provide_dbh_type();
+        }
+    }
+
     protected function provide_dbh() {}
+    protected function provide_select_dbh() { return $this->provide_dbh(); }
     protected function provide_dbh_type() {}
     protected function include_prefix() { return ''; }
  
@@ -479,7 +502,21 @@ class Stark__ORM {
         if ( is_null( $this->__dbh ) ) $this->load_dbh();
         return self::$__DBH_CACHE[ $this->__dbh ];
     }
-        
+
+    public function select_dbh() {
+        if ( $this->__object_forward !== null ) return $this->do_object_forward_method(__FUNCTION__);
+
+        if ( is_null( $this->__select_dbh ) ) $this->load_select_dbh();
+        return self::$__DBH_CACHE[ $this->__select_dbh ];
+    }
+
+    public function force_write_dbh() {
+        if ( $this->__object_forward !== null ) return $this->do_object_forward_method(__FUNCTION__);
+
+        if ( is_null( $this->__dbh ) ) $this->load_dbh();
+		$this->__select_dbh = $this->__dbh;
+		return true;
+    }
     
     #########################
     ###  The actual get(), and set(), and save() for working with multiple columns
@@ -521,7 +558,7 @@ class Stark__ORM {
 
         ###  Get all the data if it's not already cached...
         if ( $this->__table && empty( $this->__data ) && ( is_null($this->__obj_state) || $this->__obj_state == 'active' ) ) {
-            if ( is_null( $this->__dbh ) ) $this->load_dbh();
+            if ( is_null( $this->__select_dbh ) ) $this->load_select_dbh();
             START_TIMER('Stark__ORM get query', self::$_SQL_PROFILE);
             $values = array();
             $pk_where = array();  foreach ($this->__primary_key as $col) { $pk_where[] = "$col = ?";  $values[] = $this->__pk_values[$col]; }
@@ -541,7 +578,7 @@ class Stark__ORM {
         $return_ary = array();
         foreach ($columns as $col) {
             ###  Prefer data columns first (in case people define a relation the same name as a column --> POSSIBLE INFINITE LOOP)
-            if ( isset($this->__schema[$col]) ) { $return_ary[] = $this->__data[$col]; }
+            if ( isset($this->__schema[$col]) ) { $return_ary[] = isset($this->__data[$col])?$this->__data[$col]:null; }
             ###  Otherwise handle relation access
             else                                         { $return_ary[] = $this->get_relation( $col ); }
         }
@@ -586,7 +623,7 @@ class Stark__ORM {
         ###  Set the new values in $this->__data
         foreach (array_keys($to_set) as $col) {
             ###   If on the first edit they want to remember the OLD values, then DO...
-            if ( $this->remember_old_values() && ! $this->__columns_to_save[ $col ] ) {
+            if ( $this->remember_old_values() && empty($this->__columns_to_save[ $col ]) && isset($this->__data[$col]) ) {
                 $this->__data['__old__'][ $col ] = $this->__data[ $col ];
             }
             $this->__columns_to_save[ $col ] = true;
@@ -632,7 +669,7 @@ class Stark__ORM {
     /** 
      * set_and_save() - Convenience, do a {@link set()} then a {@link save()}
      */
-    public function set_and_save($to_set) { $this->set($to_set);  $this->save(); }
+    public function set_and_save($to_set) { return ( $this->set($to_set) &&  $this->save() ) ? true : false; }
     /** 
      * save() - Take all the columns set locally, and send an UPDATE to the database
      */
@@ -720,23 +757,18 @@ class Stark__ORM {
             $class = $rel['class'];
             if ( ! class_exists($class) ) require_once( $this->include_prefix() . $rel['include']);
 
-            $this->__relation_data[$name] = new $class ($rel_pk_values, null, $this->__dbh);
+            $this->__relation_data[$name] = new $class ($rel_pk_values, null, $this->__dbh,$this->__select_dbh);
 
             END_TIMER('Stark__ORM get_relationship has_one', self::$_SQL_PROFILE);
         }
         else if ( $rel['relationship'] == 'has_many' ) {
             START_TIMER('Stark__ORM get_relationship has_many', self::$_SQL_PROFILE);
             
-            ###  Read the 'foreign_key_columns' definition
-            $rel_pk_values = array();
-            $are_null_values = false;
-            if ( is_array($rel['foreign_key_columns']) ) { $fk_columns =        $rel['foreign_key_columns']; }
-            else                                         { $fk_columns = array( $rel['foreign_key_columns'] ); }
-
+			###  Read the 'foreign_table_pkey' definition
             if ( is_array($rel['foreign_table_pkey']) ) { $foreign_pkey =        $rel['foreign_table_pkey']; }
             else                                        { $foreign_pkey = array( $rel['foreign_table_pkey'] ); }
             
-            if ( is_null( $this->__dbh ) ) $this->load_dbh();
+            if ( is_null( $this->__select_dbh ) ) $this->load_select_dbh();
 
 			///  Handle custom hook for 
 			if ( ! empty($rel['custom_query_hook']) ) {
@@ -744,8 +776,13 @@ class Stark__ORM {
 				if ( is_array( $hook ) && $hook[0] == 'THIS' ) {
 					$hook[0] = $this;
 				}
-				$data = call_user_func_array($hook, array($rel));
+				$dbh = $this->select_dbh();
+				$data = call_user_func_array($hook, array($rel, $this, $this->__pk_values, $this->__primary_key, $dbh));
 			} else {
+				###  Read the 'foreign_key_columns' definition
+				if ( is_array($rel['foreign_key_columns']) ) { $fk_columns =        $rel['foreign_key_columns']; }
+				else                                         { $fk_columns = array( $rel['foreign_key_columns'] ); }
+
 				///  Allow overriding of the Join-From Local columns
 				$join_vals = false;
 				if ( ! empty( $rel['local_columns'] ) ) {
@@ -775,7 +812,7 @@ class Stark__ORM {
             $obj_list = array();
             foreach ( $data as $row ) {
                 $pkey_vals = array();  foreach ($foreign_pkey as $col) { $pkey_vals[] = $row[$col]; }
-                $obj_list[join('||--||',$pkey_vals)] = new $class ($pkey_vals,$row,$this->__dbh);
+                $obj_list[join('||--||',$pkey_vals)] = new $class ($pkey_vals,$row,$this->__dbh,$this->__select_dbh);
             }
 
             $this->__relation_data[$name] = $obj_list;
@@ -786,8 +823,6 @@ class Stark__ORM {
             START_TIMER('Stark__ORM get_relationship many_to_many', self::$_SQL_PROFILE);
             
             ###  Read the 'foreign_key_columns' definition
-            $rel_pk_values = array();
-            $are_null_values = false;
 
 			$ft_join_clause = 'USING';
 			$using_clause = array();
@@ -817,7 +852,7 @@ class Stark__ORM {
                 $join_table_fixed_values = $rel['join_table_fixed_values'];
             }
             
-            if ( is_null( $this->__dbh ) ) $this->load_dbh();
+            if ( is_null( $this->__select_dbh ) ) $this->load_select_dbh();
 
 			if ( ! empty($rel['custom_query_hook']) ) {
 				$hook = $rel['custom_query_hook'];
@@ -912,7 +947,7 @@ class Stark__ORM {
 		###  If the column names in the Join table aren't the same as they are in my table
 		$pkey_columns_in_join_table = $this->__primary_key;
 		if ( ! empty( $rel['pkey_columns_in_join_table'] ) ) {
-			$pkey_columns_in_join_table = (array) $rel['pkey_c/olumns_in_join_table'];
+			$pkey_columns_in_join_table = (array) $rel['pkey_columns_in_join_table'];
 		}
         
         ###  If there are any 'join_table_fixed_values'
@@ -951,6 +986,7 @@ class Stark__ORM {
         if ( $this->__object_forward !== null ) return $this->do_object_forward_method(__FUNCTION__);
         if(!$this->has_relation($relation, $pkey)) return true;
         
+ 		$pkey = (array) $pkey;
         $relation_key = join('||--||',(array) $pkey);
         $rel = &$this->__relations[$relation];
         unset($this->__relation_data[$relation][$relation_key]);
@@ -1055,12 +1091,14 @@ class Stark__ORM {
     }
     /**
      * clear_relation_cache() - clear just relation cache, but not column data
+     * $forceWriteDBH - bool - force db to always use the master db
      */
-    public function clear_relation_cache() {
+    public function clear_relation_cache($forceWriteDBH = true) {
         if ( $this->__object_forward !== null ) return $this->do_object_forward_method(__FUNCTION__);
         START_TIMER('Stark__ORM clear_relation_cache()', self::$_SQL_PROFILE);
         $this->post_clear_relation_cache_handler();
         $this->__relation_data = array();
+        if($forceWriteDBH){ $this->force_write_dbh(); }
         END_TIMER('Stark__ORM clear_relation_cache()', self::$_SQL_PROFILE);
     }
     /** 
@@ -1184,7 +1222,7 @@ class Stark__ORM {
         if ( $this->__object_forward !== null ) return $this->do_object_forward_method(__FUNCTION__);
 
 		$class = get_class($this);
-		$my_clone = new $class(array(), null, $this->__dbh);
+		$my_clone = new $class(array(), null, $this->__dbh,$this->__select_dbh);
 
 		$data = array();
 		foreach ( $this->__schema as $col => $x ) { if ( ! in_array($col, $this->__primary_key) ) $data[$col] = $this->get($col); }
@@ -1300,15 +1338,13 @@ class Stark__ORM {
         START_TIMER('Stark__ORM get_relationship has_many (pre_load_sub)', self::$_SQL_PROFILE);
             
         ###  Read the 'foreign_key_columns' definition
-        $rel_pk_values = array();
-        $are_null_values = false;
         if ( is_array($rel['foreign_key_columns']) ) { $fk_columns =        $rel['foreign_key_columns']; }
         else                                         { $fk_columns = array( $rel['foreign_key_columns'] ); }
 
         if ( is_array($rel['foreign_table_pkey']) ) { $foreign_pkey =        $rel['foreign_table_pkey']; }
         else                                        { $foreign_pkey = array( $rel['foreign_table_pkey'] ); }
             
-        if ( is_null( $this->__dbh ) ) $this->load_dbh();
+        if ( is_null( $this->__select_dbh ) ) $this->load_select_dbh();
 
         $class = $rel['class'];
         if ( ! class_exists($class) ) require_once($this->include_prefix() . $rel['include']);
@@ -1365,7 +1401,7 @@ class Stark__ORM {
                 if ( $any_pkeys_were_null ) continue; 
 
                 $g_class = $sub_tables['aliases'][$alias];
-                $obj = new $g_class ($pkey_vals,$grow,$this->__dbh);
+                $obj = new $g_class ($pkey_vals,$grow,$this->__dbh,$this->__select_dbh);
 
                 ###  If this is the Primary table, then add it to the object list
                 ###    ( otherwise, we have pre-loaded the object, and we're done)
@@ -1387,7 +1423,7 @@ class Stark__ORM {
 
         ###  Get a blank object
         if ( is_null( $obj ) ) {
-			$obj = new $class (array(), null, $this->__dbh);
+			$obj = new $class (array(), null, $this->__dbh,$this->__select_dbh);
 		}
         foreach ( $obj->__relations() as $name => $rel ) {
             if ( $rel['relationship'] != 'has_one'
@@ -1396,7 +1432,7 @@ class Stark__ORM {
 
             $sub_class = $rel['class'];
             if ( ! class_exists($sub_class) ) require_once($this->include_prefix() . $rel['include']);
-            $sub_obj = new $sub_class (array(), null, $this->__dbh);
+            $sub_obj = new $sub_class (array(), null, $this->__dbh,$this->__select_dbh);
 
             ###  Record what we need to Join this table and get it's columns
             $sub_alias = str_repeat( array_shift( $sub_tables['alias_letters'] ), 4 );
@@ -1462,7 +1498,14 @@ class Stark__ORM {
 		}
 		if ( ! isset( self::$__OBJECT_CACHE[ $this->__dbh ][$this->__cache_key] ) ) {
 			trace_dump();
-			bug( "ERROR: Tried to forward to an already-garbage-collected object.  Ref-count:", self::$__OBJECT_REFCOUNT[ $this->__dbh ][$this->__cache_key], $this->__dbh, $this->__object_forward, $this->__cache_key );
+			bug( array( "ERROR: Tried to forward to an already-garbage-collected object.  Ref-count:", 
+						'refcount' => self::$__OBJECT_REFCOUNT[ $this->__dbh ][$this->__cache_key], 
+						'this_dbh' => $this->__dbh, 
+						'this_select_dbh' => $this->__select_dbh, 
+						'object_forward' => $this->__object_forward, 
+						'cache_key' => $this->__cache_key
+						)
+				 );
 			exit;
 		}
         return call_user_func_array(array(&self::$__OBJECT_CACHE[ $this->__dbh ][$this->__cache_key], $method_name), $trace[1]['args']);
@@ -1540,7 +1583,7 @@ class Stark__ORM {
      */
     public function validate($form = null) {
         if ( $this->__object_forward !== null ) return $this->do_object_forward_method(__FUNCTION__);
-        $tmp = func_get_args();  $tmp[] = $this->__schema;  return call_user_func_array( 'validate', $tmp );
+        $tmp = func_get_args();  $tmp[] = $this->__schema; $tmp[] = $this;  return call_user_func_array( 'validate', $tmp );
     }
 
     /**
@@ -1559,7 +1602,7 @@ class Stark__ORM {
      */
     public function extract_and_validate($form = null) {
         if ( $this->__object_forward !== null ) return $this->do_object_forward_method(__FUNCTION__);
-        $tmp = func_get_args();  $tmp[] = $this->__schema;  return call_user_func_array( 'extract_and_validate', $tmp );
+        $tmp = func_get_args();  $tmp[] = $this->__schema; $tmp[] = $this;  return call_user_func_array( 'extract_and_validate', $tmp );
     }
 
     /**
@@ -1572,7 +1615,7 @@ class Stark__ORM {
      */
     public function validate_column_value($col, $value) {
         if ( $this->__object_forward !== null ) return $this->do_object_forward_method(__FUNCTION__);
-        return validate_column_value($col, $value, $this->__schema);
+        return validate_column_value($col, $value, $this->__schema, $this);
     }
 
 	
@@ -1584,7 +1627,7 @@ class Stark__ORM {
 	 * @return PDOStatement
 	 */
 	function dbh_query_bind( $sql ) {
-	    $use_dbh = $this->dbh();
+	    $use_dbh = $this->select_dbh();
 	    if ( self::$_SQL_PROFILE ) START_TIMER('dbh_query_bind');
 	    $bind_params = array_slice( func_get_args(), 1 );
 	    ###  Allow params passed in an array or as args
@@ -1649,6 +1692,7 @@ class Stark__ORM {
 }
 
 
+if (! function_exists('form_extract') ) {
 /**
  * validation.inc.php
  * 
@@ -1738,6 +1782,7 @@ function validate($form = null) {
     if ( is_null($form) ) $form = &$_REQUEST;
     $cols = array_slice( func_get_args(), 1 );
     $prefix = '';
+	if ( is_object( array_pop(array_values($cols)) ) ) $val_object = array_pop($cols);
     ###  Schema will be an array of arrays as the last param...
     if ( count( $cols ) > 1
          && is_array(array_pop(array_values($cols)))
@@ -1755,7 +1800,7 @@ function validate($form = null) {
     $to_set = array();  $errors = array();
     $all_ok = true;
     foreach ($cols as $col) {
-        list($ok, $scrubbed_value, $col_errors) = validate_column_value($col, (isset($form[$prefix.$col]) ? $form[$prefix.$col] : null), $schema );
+        list($ok, $scrubbed_value, $col_errors) = validate_column_value($col, (isset($form[$prefix.$col]) ? $form[$prefix.$col] : null), $schema, $val_object );
         if ( ! $ok ) {
             $errors[$prefix.$col] = $col_errors;
             $all_ok = false;
@@ -1783,6 +1828,11 @@ function extract_and_validate($form = null) {
     if ( is_null($form) ) $form = &$_REQUEST;
     $cols = array_slice( func_get_args(), 1 );
     $prefix = '';
+
+	if ( is_object( array_pop(array_values($cols)) ) ) $val_object = array_pop($cols);
+    else {
+        $val_object = (object) array();
+    }
     ###  Schema will be an array of arrays as the last param...
     if ( count( $cols ) > 1
          && is_array(array_pop(array_values($cols)))
@@ -1798,7 +1848,7 @@ function extract_and_validate($form = null) {
          &&                   ! is_array(array_pop(  array_values($cols))) ) { $prefix = array_pop(array_values($cols));  $cols = array_shift(array_values($cols)); };
     
     $extracted = form_extract($form, $cols, $prefix);
-    list($to_set, $all_ok, $errors) = validate($extracted, $cols, $prefix, $schema);
+    list($to_set, $all_ok, $errors) = validate($extracted, $cols, $prefix, $schema, $val_object);
     return array( $to_set, $all_ok, $errors );
 }
 
@@ -1810,7 +1860,7 @@ function extract_and_validate($form = null) {
  * @param string $col     The column name to validate.  It uses this to read the schema definition and get the criteria
  * @param mixed  $value   The value to be tested
  */
-function validate_column_value($col, $value, $schema) {
+function validate_column_value($col, $value, $schema, $val_object = null) {
     ###  Error out if not in schema
     if ( ! isset( $schema[ $col ] ) || ! is_array( $schema[ $col ] ) ) {
         ###  Error if they use an invalid relationship type
@@ -1818,7 +1868,7 @@ function validate_column_value($col, $value, $schema) {
         return null;
     }
     
-    return do_validation( $col, $value, $schema[ $col ] );
+    return do_validation( $col, $value, $schema[ $col ], $val_object );
 }
 
 
@@ -1870,7 +1920,7 @@ function validate_column_value($col, $value, $schema) {
  * @param string $valhash  an array containing validation parameters
  * @return mixed
  */
-function do_validation( $col, $value, array $valhash ) {
+function do_validation( $col, $value, array $valhash, $val_object = null ) {
 
     if ( ! empty( $valhash['name'] ) ) $name = ucfirst( $valhash['name'] );
     if ( empty($name) )                $name = ucfirst( preg_replace('/_/',' ', $col) );
@@ -1887,95 +1937,103 @@ function do_validation( $col, $value, array $valhash ) {
     if ( ! empty($valhash['format']) && $valhash['format'] == 'datetime'           && (!  empty($value)) ) { $value = strtotime($value); $value = empty($value) ? 'invalid date' : date('Y-m-d H:i:s', $value); }
     ###  If 'not_empty_string', then turn into null
     if ( ! empty($valhash['not_empty_string'])                  && isset($value) && strlen($value) == 0 ) $value = null;
+	###  Custom Hooks here
+	if ( ! empty($valhash['custom_prescrub_hook']) ) $value = call_user_func_array( ( is_object( $val_object ) && method_exists( $val_object, $valhash['custom_prescrub_hook'] ) ) ? array( $val_object, $valhash['custom_prescrub_hook'] ) : $valhash['custom_prescrub_hook'], array($col, $value, $valhash) ); 
 
     ###  If there is NO value
     if ( ! isset( $value ) || $value == '') {
         ###  Required
-        if    ( ! empty($valhash['required']) 
-            ) { return array( false, $value, array( array($name." is required",'required')) ); }
+        if    ( ! empty($valhash['required']) ) { return array( false, $value, array( array($name." is required",'required','\S')) ); }
     }
     ###  If there IS a value, validate it...
     else {
         ###  Max length
         if    ( ! empty($valhash['maxlength'])
-                && ( (    ini_get('default_charset') == 'UTF-8' && utf8_strlen($value) > $valhash['maxlength'] ) 
+                && ( (    ini_get('default_charset') == 'UTF-8' && utf8_strlen($value) > $valhash['maxlength'] )
                      || ( ini_get('default_charset') != 'UTF-8' &&      strlen($value) > $valhash['maxlength'] )
                      )
-            ) { return array( false, $value, array( array($name." may not be longer than ". $valhash['maxlength'] ." characters",'too_long')) ); }
+				) { return array( false, $value, array( array($name." may not be longer than ". $valhash['maxlength'] ." characters",'too_long','^.{0,'. (int) $valhash['maxlength'] .'}.$')) ); }
         ###  Min length
         else if ( ! empty($valhash['minlength'])
-                && ( (    ini_get('default_charset') == 'UTF-8' && utf8_strlen($value) < $valhash['minlength'] ) 
+                && ( (    ini_get('default_charset') == 'UTF-8' && utf8_strlen($value) < $valhash['minlength'] )
                      || ( ini_get('default_charset') != 'UTF-8' &&      strlen($value) < $valhash['minlength'] )
                      )
-            ) { return array( false, $value, array( array($name." must be at least ". $valhash['minlength'] ." characters",'too_short')) ); }
+            ) { return array( false, $value, array( array($name." must be at least ". $valhash['minlength'] ." characters",'too_short','.{'. (int) $valhash['minlength'] .'}')) ); }
         ###  Regular Expression
         else if ( ! empty($valhash['regex'])          && preg_match($valhash['regex'],          $value) == 0
-                  ) { return array( false, $value, array( array($name." is not valid". (isset($valhash['regex_advice']) ? ('.  '. $valhash['regex_advice']) : ''),'invalid_regex')) ); }
+                  ) { return array( false, $value, array( array($name." is not valid". (isset($valhash['regex_advice']) ? ('.  '. $valhash['regex_advice']) : ''),'invalid_regex',$valhash['regex'])) ); }
         ###  Negative Match Regular Expression
         else if ( ! empty($valhash['negative_regex']) && preg_match($valhash['negative_regex'], $value) > 0
-                  ) { return array( false, $value, array( array($name." is not valid". (isset($valhash['regex_advice']) ? ('.  '. $valhash['regex_advice']) : ''),'invalid_regex')) ); }
+                  ) { return array( false, $value, array( array($name." is not valid". (isset($valhash['regex_advice']) ? ('.  '. $valhash['regex_advice']) : ''),'invalid_regex','!'. $valhash['negative_regex'])) ); }
         ###  Format : email
         else if ( ! empty($valhash['format'])
                 && $valhash['format'] == 'email'
                 && preg_match('/^[a-z0-9][a-z0-9\._\-\+]*\@([a-z0-9\-]+\.)+[a-z]{2,}$/i', $value) == 0
-            ) { return array( false, $value, array( array($name." is not a valid email address",'invalid_email')) ); }
+				  ) { return array( false, $value, array( array($name." is not a valid email address",'invalid_email','^[a-z0-9][a-z0-9\._\-\+]*\@([a-z0-9\-]+\.)+[a-z]{2,}$')) ); }
         ###  Format : boolean
         else if ( ! empty($valhash['format'])
                 && $valhash['format'] == 'bool'
                 && preg_match('/^(t|true|y|yes|1|f|false|n|no|0|1)$/i', $value) == 0
             ) {
-            return array( false, $value, array( array($name." is not a valid boolean value",'invalid_boolean')) );
+            return array( false, $value, array( array($name." is not a valid boolean value",'invalid_boolean','^(t|true|y|yes|1|f|false|n|no|0|1)$')) );
         }
         ###  Format : decimal
         else if ( ! empty($valhash['format'])
                 && $valhash['format'] == 'decimal'
                 && preg_match('/^\-?(\d+(\.\d+)?|\.\d+)$/', $value) == 0
-            ) { return array( false, $value, array( array($name." is not a valid number",'invalid_decimal')) ); }
+				  ) { return array( false, $value, array( array($name." is not a valid number",'invalid_decimal','^\-?(\d+(\.\d+)?|\.\d+)$')) ); }
         ###  Format : integer
         else if ( ! empty($valhash['format'])
                 && $valhash['format'] == 'integer'
                 && preg_match('/^\-?\d+$/', $value) == 0
-            ) { return array( false, $value, array( array($name." is not a valid number",'invalid_integer')) ); }
+				  ) { return array( false, $value, array( array($name." is not a valid number",'invalid_integer','^\-?\d+$')) ); }
         ###  Format : date
         else if ( ! empty($valhash['format'])
                 && $valhash['format'] == 'date'
                 && ( preg_match('/^\d{4}\-\d{2}\-\d{2}$/', $value) == 0
                      || strtotime( $value ) === false
                     )
-            ) { return array( false, $value, array( array($name." is not a valid date",'invalid_date')) ); }
+				  ) { return array( false, $value, array( array($name." is not a valid date",'invalid_date','^\d{4}\-\d{2}\-\d{2}$')) ); }
         ###  Format : datetime
         else if ( ! empty($valhash['format'])
                 && $valhash['format'] == 'datetime'
                 && ( preg_match('/^\d{4}\-\d{2}\-\d{2}( \d{2}:\d{2}:\d{2})?$/', $value) == 0
                      || strtotime( $value ) === false
                     )
-            ) { return array( false, $value, array( array($name." is not a valid date",'invalid_date')) ); }
+				  ) { return array( false, $value, array( array($name." is not a valid date",'invalid_date','^\d{4}\-\d{2}\-\d{2}( \d{2}:\d{2}:\d{2})?$')) ); }
         ###  Format : credit_card_number
         else if ( ! empty($valhash['format'])
                 && $valhash['format'] == 'credit_card_number'
                 && ( preg_match('/^\d{13,16}$/', $value) == 0
                      || ! luhn_10( $value )
                     )
-            ) { return array( false, $value, array( array($name." is not a valid credit card number",'invalid_cc_number')) ); }
+				  ) { return array( false, $value, array( array($name." is not a valid credit card number",'invalid_cc_number','^\d{13,16}$')) ); }
         ###  Format : ip
         else if ( ! empty($valhash['format'])
                 && $valhash['format'] == 'ip'
                 && ( preg_match('/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}?$/', $value) == 0
                      || ( max( split('.', $value) ) > 255 )
                     )
-            ) { return array( false, $value, array( array($name." is not a valid IP address",'invalid_ip_address')) ); }
+				  ) { return array( false, $value, array( array($name." is not a valid IP address",'invalid_ip_address','^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}?$')) ); }
         ###  Greater Than
-        else if ( ! empty($valhash['gt'])  && $value <= $valhash['gt'] 
+        else if ( ! empty($valhash['gt'])  && $value <= $valhash['gt']
             ) { return array( false, $value, array( array($name." may not be less than or equal to ". $valhash['gt'],'greater_than')) ); }
         ###  Greater Than or equal To
-        else if ( ! empty($valhash['ge']) && $value < $valhash['ge'] 
+        else if ( ! empty($valhash['ge']) && $value < $valhash['ge']
             ) { return array( false, $value, array( array($name." may not be less than ". $valhash['ge'],'greater_than_or_eq')) ); }
         ###  Less Than
-        else if ( ! empty($valhash['lt'])  && $value >= $valhash['lt'] 
+        else if ( ! empty($valhash['lt'])  && $value >= $valhash['lt']
             ) { return array( false, $value, array( array($name." may not be greater than or equal to ". $valhash['lt'],'less_than')) ); }
         ###  Less Than or equal To
-        else if ( ! empty($valhash['le']) && $value > $valhash['le'] 
+        else if ( ! empty($valhash['le']) && $value > $valhash['le']
             ) { return array( false, $value, array( array($name." may not be greater than ". $valhash['le'],'less_than_or_eq')) ); }
+		###  Custom Validation
+		else if ( ! empty($valhash['custom_validate_hook']) ) {
+			$val_return = call_user_func_array( ( is_object( $val_object ) && method_exists( $val_object, $valhash['custom_validate_hook'] ) ) ? array( $val_object, $valhash['custom_validate_hook'] ) : $valhash['custom_validate_hook'], array($col, $value, $valhash) ); 
+			if ( ! is_array($val_return) ) {$val_return = array($val_return);}
+			if ( ! $val_return[0] ) return($val_return);
+			if ( array_key_exists( 1, $val_return ) ) $value = $val_return[1];
+		}
     }
     
     return array( true, $value, array() );
@@ -2013,4 +2071,5 @@ function is_valid_date_time($dateTime)
     }
 
     return false;
+}
 }
