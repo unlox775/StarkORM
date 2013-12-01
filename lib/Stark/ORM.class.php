@@ -4,16 +4,9 @@
 if ( ! function_exists('bug')
      && file_exists(dirname('__FILE__') .'/debug.inc.php')
      ) require_once(dirname('__FILE__') .'/debug.inc.php');
-define('ORM_SQL_PROFILE', false );
-define('ORM_SQL_DEBUG',   false );
-define('ORM_SQL_WRITE_DEBUG', false);
-
-$GLOBALS['Stark__ORM_OBJECT_CACHE'] = array();
-$GLOBALS['Stark__ORM_DBH_CACHE'] = array();
-$GLOBALS['ORM_SQL_LOG'] = array();
 
 /**
- * Stark__ORM Class, for stark-as-possible Object-to-Relational Mapping (for PostgreSQL, MySQL and SQLite)
+ * Stark__ORM Class, for simple-as-possible Object-to-Relational Mapping (for PostgreSQL, MySQL and SQLite)
  *
  * Example usage:
  *
@@ -24,10 +17,10 @@ $GLOBALS['ORM_SQL_LOG'] = array();
  *     protected function include_prefix()   { return ''; } // or '/path/to/lib';
  * }
  * class MyStudent extends Stark__ORM__DBHProvider {
- *     protected $table       = 'student';
- *     protected $primary_key = array( 'student_id' );
- *     protected $column_sequences = array( 'student_id' => 'student_student_id_seq' );
- *     protected $schema = array( 'student_id'  => array(),
+ *     protected $__table       = 'student';
+ *     protected $__primary_key = array( 'student_id' );
+ *     protected $__column_sequences = array( 'student_id' => 'student_student_id_seq' );
+ *     protected $__schema = array( 'student_id'  => array(),
  *                                'name'           => array( 'maxlength' => 25, 'required' => true ),
  *                                'email'          => array( 'format' => 'email', 'maxlength' => 100, 'required' => true ),
  *                                'homepage_url'   => array( 'maxlength' => 100, 'regex' => '/^http:\/\//' ),
@@ -35,7 +28,7 @@ $GLOBALS['ORM_SQL_LOG'] = array();
  *                                'status'         => array(),
  *                                'creation_date'  => array(), # a database-side default will auto fill this in...
  *         );
- *     protected $relations = array(
+ *     protected $__relations = array(
  *         'mentor' => array( 'relationship' => 'has_one',                 
  *                            'include'      => 'model/Teacher.class.php', # A file to require_once(), (should be in include_path)
  *                            'class'        => 'Teacher',                 # The class name
@@ -130,7 +123,7 @@ $GLOBALS['ORM_SQL_LOG'] = array();
  * access object variables, include this line as the first line of
  * the method code:
  *
- * <code>if ( isset( $this->object_forward ) ) return $this->do_object_forward_method();</code>
+ * <code>if ( $this->object_forward !== null ) return $this->do_object_forward_method(__FUNCTION__);</code>
  *
  * This just quickly checks if the object is a forwarded object
  * and the {@link do_object_forward_method()} method takes care of the
@@ -162,26 +155,26 @@ $GLOBALS['ORM_SQL_LOG'] = array();
  */
 class Stark__ORM {
     /**
-     * $table - the table who's rows this object represents
+     * $__table - the table who's rows this object represents
      *
      * Overridden by child-classes.
      */
     protected $__table = null;
     /**
-     * $primary_key - the primary key for this table
+     * $__primary_key - the primary key for this table
      *
      * Overridden by child-classes.  A flat array of column names.
      */
     protected $__primary_key = array();
     /**
-     * $column_sequences - what columns have sequences by name
+     * $__column_sequences - what columns have sequences by name
      *
      * Overridden by child-classes.  An assoc where the keys are
      * column names and the values are sequence names.
      */
     protected $__column_sequences = array();
     /**
-     * $schema - Define the columns and simple validation criteria
+     * $__schema - Define the columns and simple validation criteria
      *
      * Overridden by child-classes.  This is an assoc array of
      * column names where every value is an assoc array of
@@ -196,7 +189,7 @@ class Stark__ORM {
      */
     protected $__schema = array();
     /**
-     * $relations - Overridden by child classes to allow quick related object access
+     * $__relations - Overridden by child classes to allow quick related object access
      * 
      * Relations are simple ways to link to one or a list of objects
      * that directly relate with foreign keys in the database.  The
@@ -260,6 +253,24 @@ class Stark__ORM {
     protected $__cache_key = null;
     protected $__obj_state = null;
     protected $__remember_old_values = false;
+	public $__opt_mode = null;
+	private static $__global_opt_mode = 'p';
+	private static $__opt_mode_getting_parent = false;
+
+	/**
+	 * Internal Singletom / DB Handle Caching arrays
+	 */
+	public static $__OBJECT_CACHE = array();
+	public static $__OBJECT_REFCOUNT = array();
+	public static $__DBH_CACHE = array();
+	public static $__SQL_LOG = array();
+
+	/**
+	 * Debugging / Profiling
+	 */
+	public static $_SQL_PROFILE 	= false;
+	public static $_SQL_DEBUG   	= false;
+	public static $_SQL_WRITE_DEBUG = false;
 
     /** 
      * __construct
@@ -285,7 +296,6 @@ class Stark__ORM {
      * @param mixed $select_star_data    If you got the PKey from a SQL query you just ran and you also got the full "select * from ..." for that table row, just pass that (assoc) array here and it'll save SimplORM from having to re-query the data
      */
     public function __construct($pk_value = array(), $select_star_data = null, $sync_dbh = null) {
-        global $Stark__ORM_OBJECT_CACHE;
 
         ###  Handle one or an array or PK values
         if ( is_array( $pk_value ) ) {
@@ -293,11 +303,6 @@ class Stark__ORM {
         }
         else { $this->__pk_values[$this->__primary_key[0]] = $pk_value; }
 
-        ###  Allow them to supply a "SELECT * " output for this row if they already had it...
-        if ( is_array( $select_star_data ) ) {
-            ###  For now, just trust it...  Maybe later we'll make it check that all the cols are present...
-            $this->__data = $select_star_data;
-        }
 		###  For when you KNOW the DBH ID, like for internal object creation...
         if ( is_int( $sync_dbh ) ) {
             $this->__dbh = $sync_dbh;
@@ -308,36 +313,126 @@ class Stark__ORM {
         $pk_string = array();  foreach ($this->__primary_key as $col) { if ( ! isset($this->__pk_values[$col]) || is_null($this->__pk_values[$col]) ) $has_null_pk_values = true;  $pk_string[] = $this->__pk_values[$col]; }
 		if ( is_null( $this->__dbh ) ) $this->load_dbh();
         if ( ! $has_null_pk_values ) {
-            $this->__cache_key = get_class($this). '||--||'. $this->__table .'||--||'. join('||--||', $pk_string); 
-			if ( isset($Stark__ORM_OBJECT_CACHE[ $this->__dbh ][ $this->__cache_key ]) ) {
-                $this->__object_forward = $Stark__ORM_OBJECT_CACHE[ $this->__dbh ][$this->__cache_key];
+            $this->__cache_key = get_class($this). '||--||'. $this->__table .'||--||'. join('||--||', $pk_string);
+
+			###  For memory opt_mode, it may get the object in advance so that this object
+			###    will be guaranteed to be an object_forward child
+			$this->opt_mode_preload(func_get_args());
+
+			if ( Stark__ORM::$__global_opt_mode != 'n' && isset(self::$__OBJECT_CACHE[ $this->__dbh ][ $this->__cache_key ]) ) {
+                $this->__object_forward = true;
 #				bug("USING CACHE: ".$this->__cache_key);
             
                 ###  Blank out some $this data to save memory
-                unset($this->__data, $this->__table, $this->__schema, $this->__relations, $this->__primary_key, $this->__pk_values, $this->__dbh, $this->__columns_to_save, $this->__obj_state, $this->__cache_key );
+                unset($this->__data, $this->__table, $this->__schema, $this->__relations, $this->__primary_key, $this->__pk_values, $this->__columns_to_save, $this->__obj_state );
+				$this->__opt_mode = self::$__OBJECT_CACHE[ $this->__dbh ][$this->__cache_key]->__opt_mode;
             }
-            else { $Stark__ORM_OBJECT_CACHE[ $this->__dbh ][$this->__cache_key] = $this; }
+            else {
+				if ( Stark__ORM::$__global_opt_mode != 'n' ) self::$__OBJECT_CACHE[ $this->__dbh ][$this->__cache_key] = $this;
+				$this->__opt_mode = Stark__ORM::$__global_opt_mode;
+			}
+
+			if ( $this->__opt_mode == 'm' && $this->__object_forward !== null ) @self::$__OBJECT_REFCOUNT[ $this->__dbh ][$this->__cache_key]++;
         }
         ###  Otherwise, they called it with none or not enough PKey params, so they must be plannin on calling ->create() later...
         else $this->__obj_state = 'not_created';
+
+        ###  Allow them to supply a "SELECT * " output for this row if they already had it...
+        if ( $this->__object_forward === null && is_array( $select_star_data ) ) {
+            ###  For now, just trust it...  Maybe later we'll make it check that all the cols are present...
+            $this->__data = $select_star_data;
+        }
     }
+
+	public function __clone() {
+        START_TIMER('Stark__ORM __clone() of '. ($this->__object_forward ? 'forward' : 'parent'), self::$_SQL_PROFILE);
+		if ( $this->__opt_mode == 'm' ) @self::$__OBJECT_REFCOUNT[ $this->__dbh ][$this->__cache_key]++;
+        END_TIMER('Stark__ORM __clone() of '. ($this->__object_forward ? 'forward' : 'parent'), self::$_SQL_PROFILE);
+	}
+
+	public function __destruct() {
+        START_TIMER('Stark__ORM __destruct() of '. ($this->__object_forward ? 'forward' : 'parent'), self::$_SQL_PROFILE);
+		if ( $this->__opt_mode == 'm' ) {
+			if ( $this->__object_forward !== null ) self::$__OBJECT_REFCOUNT[ $this->__dbh ][$this->__cache_key]--;
+			if ( self::$__OBJECT_REFCOUNT[ $this->__dbh ][$this->__cache_key] <= 0 ) {
+				self::$__OBJECT_CACHE[ $this->__dbh ][ $this->__cache_key ] = null;
+				unset( self::$__OBJECT_CACHE[ $this->__dbh ][ $this->__cache_key ] );
+			}
+		}
+        END_TIMER('Stark__ORM __destruct() of '. ($this->__object_forward ? 'forward' : 'parent'), self::$_SQL_PROFILE);
+	}
+
+	/* optimization_mode()
+	 *
+	 * Gets or Sets the Optimization Mode.
+	 *
+	 * By default Stark__ORM is set to acheive hightest performance.
+	 * much of this comes by selecting a little as possible, but trying
+	 * hardest to not have to re-select any data that has already been
+	 * selected.  Thie means for example, that if you get "new MyObj(5)"
+	 * amd let that object fall out of scope, that a second "new MyObj(5)"
+	 * will not need to run a SQL query again to get the data.
+	 * 
+	 * The disdvantage however, is that memory usage for Stark__ORM usally
+	 * only increases.  This is usually managed for web applications by
+	 * doing less operations and cutting down on unnecessary objects being
+	 * used.  However, for long-running daemons or data processing
+	 * applications, this can be a serious problem.
+	 *
+	 * The other mode is 'memory', which allows for garbage collection
+	 * of any objects who's last reference has fallen out of scope.
+	 *
+	 * NOTE: the performance mode is set globally, but each object caches
+	 * the current mode at the instant of __construct(), In this way you can
+	 * be selective of which objects you want garbage-collected or not.
+	 *
+	 * The return value is the current or new mode.
+	 *
+     * @param mixed $mode          Either 'p' for performance, 'm' for memory, or 'n' for no-singleton.  If not passed, it gets the current value and does not change the mode
+	 */
+	public static function optimization_mode($mode = null) {
+		if ( ! is_null( $mode ) )
+			Stark__ORM::$__global_opt_mode = substr($mode, 0, 1);
+		return Stark__ORM::$__global_opt_mode;
+	}
+
+	private function opt_mode_preload($args) {
+		$class = get_class($this);
+		###  Avoid infinite loops on the same __construct()
+		if ( Stark__ORM::$__global_opt_mode != 'm'
+			 || isset(self::$__OBJECT_CACHE[ $this->__dbh ][ $this->__cache_key ])
+			 || ( ! empty( Stark__ORM::$__opt_mode_getting_parent ) && isset( Stark__ORM::$__opt_mode_getting_parent[ $this->__cache_key ] )
+				  ) ) return false;
+
+		###  Since call_user_func_array() doesn't handle "new Object()", then we have to be sneaky...
+		Stark__ORM::$__opt_mode_getting_parent[ $this->__cache_key ] = true;
+		switch (count($args)) {
+		    case 0: $obj = new $class(); break;
+		    case 1: $obj = new $class($args[0]); break;
+		    case 2: $obj = new $class($args[0],$args[1]); break;
+		    case 3: $obj = new $class($args[0],$args[1],$args[2]); break;
+		    case 4: $obj = new $class($args[0],$args[1],$args[2],$args[3]); break;
+		}
+		###  That should have cached the object in the ORM cache, so the caller __construct() will be an object_forward
+		unset( Stark__ORM::$__opt_mode_getting_parent[ $this->__cache_key ] );
+	}
+
     ///  Wait as late as possible to get the DBH...
     protected function load_dbh() {
         ###  Get the database handle
         if ( is_null( $this->__dbh ) ) {
 			///  Default value
-            $this->__dbh = count($GLOBALS['Stark__ORM_DBH_CACHE']);
+            $this->__dbh = count(self::$__DBH_CACHE);
 
 			///  Now, see if this object is already in the cache...
 			$dbh_obj = $this->provide_dbh();
-			foreach ( $GLOBALS['Stark__ORM_DBH_CACHE'] as $i => $this_dbh_obj ) {
+			foreach ( self::$__DBH_CACHE as $i => $this_dbh_obj ) {
 				if ( $this_dbh_obj === $dbh_obj ) { $this->__dbh = $i; break; }
 			}
 
-            $GLOBALS['Stark__ORM_DBH_CACHE'][ $this->__dbh ] = $dbh_obj;
+            self::$__DBH_CACHE[ $this->__dbh ] = $dbh_obj;
             $this->__dbh_type                               = $this->provide_dbh_type();
         }
-        $GLOBALS['orm_dbh'] = $GLOBALS['Stark__ORM_DBH_CACHE'][ $this->__dbh ];
     }
 
     protected function provide_dbh() {}
@@ -350,7 +445,7 @@ class Stark__ORM {
      * Returns false if the object state is either 'not_created' or 'deleted', otherwise the state must be 'active' and it returns true
      */
     public function exists() {
-        if ( isset( $this->__object_forward ) ) return $this->do_object_forward_method();
+        if ( $this->__object_forward !== null ) return $this->do_object_forward_method(__FUNCTION__);
         if ( $this->__obj_state == 'not_created' || $this->__obj_state == 'deleted') return false;
         return ( $this->__obj_state == 'active' || ! is_null($this->get($this->__primary_key[0])) );
     }
@@ -365,7 +460,7 @@ class Stark__ORM {
      * @see clear_relation_cache()
      */
     public function reset_state() {
-        if ( isset( $this->__object_forward ) ) return $this->do_object_forward_method();
+        if ( $this->__object_forward !== null ) return $this->do_object_forward_method(__FUNCTION__);
         $this->__data = array();
         $this->__obj_state = null;
         $this->clear_relation_cache();
@@ -379,10 +474,10 @@ class Stark__ORM {
      * dbh() - Quick access to the actual PDO database handle
      */
     public function dbh() {
-        if ( isset( $this->__object_forward ) ) return $this->do_object_forward_method();
+        if ( $this->__object_forward !== null ) return $this->do_object_forward_method(__FUNCTION__);
 		
         if ( is_null( $this->__dbh ) ) $this->load_dbh();
-        return $GLOBALS['Stark__ORM_DBH_CACHE'][ $this->__dbh ];
+        return self::$__DBH_CACHE[ $this->__dbh ];
     }
         
     
@@ -395,12 +490,12 @@ class Stark__ORM {
      * @param mixed $arg1    Either an array of column or relation names, a single name, or multiple names passed as arguments (not as an array) e.g. $my_user->get('name','email','birthday')
      */
     public function get($arg1) {
-        if ( isset( $this->__object_forward ) ) return $this->do_object_forward_method();
+        if ( $this->__object_forward !== null ) return $this->do_object_forward_method(__FUNCTION__);
         $caller_funcs_to_ignore = array('get','__get','get_relation','__isset','set','__set','__unset','exists','call_user_func_array','do_object_forward_method');
-        START_TIMER('Stark__ORM get', ORM_SQL_PROFILE);
+        START_TIMER('Stark__ORM get', self::$_SQL_PROFILE);
 
         ###  Quick return for vast common case
-        if ( $this->__obj_state != 'deleted' && count( func_get_args() ) == 1 && isset($arg1) && (! is_array($arg1)) && isset($this->__data[$arg1]) ) { END_TIMER('Stark__ORM get', ORM_SQL_PROFILE);  return $this->__data[$arg1]; }
+        if ( $this->__obj_state != 'deleted' && count( func_get_args() ) == 1 && isset($arg1) && (! is_array($arg1)) && isset($this->__data[$arg1]) ) { END_TIMER('Stark__ORM get', self::$_SQL_PROFILE);  return $this->__data[$arg1]; }
 
         $cols_from_array = false;
         $columns = func_get_args();
@@ -427,7 +522,7 @@ class Stark__ORM {
         ###  Get all the data if it's not already cached...
         if ( $this->__table && empty( $this->__data ) && ( is_null($this->__obj_state) || $this->__obj_state == 'active' ) ) {
             if ( is_null( $this->__dbh ) ) $this->load_dbh();
-            START_TIMER('Stark__ORM get query', ORM_SQL_PROFILE);
+            START_TIMER('Stark__ORM get query', self::$_SQL_PROFILE);
             $values = array();
             $pk_where = array();  foreach ($this->__primary_key as $col) { $pk_where[] = "$col = ?";  $values[] = $this->__pk_values[$col]; }
             $sql = "SELECT *
@@ -439,7 +534,7 @@ class Stark__ORM {
             $this->__data = $sth->fetch(PDO::FETCH_ASSOC);
 
             $this->__obj_state = empty($this->__data) ? 'not_created' : 'active';
-            END_TIMER('Stark__ORM get query', ORM_SQL_PROFILE);
+            END_TIMER('Stark__ORM get query', self::$_SQL_PROFILE);
         }
 
         ###  Return an array of the requested columns
@@ -451,7 +546,7 @@ class Stark__ORM {
             else                                         { $return_ary[] = $this->get_relation( $col ); }
         }
 
-        END_TIMER('Stark__ORM get', ORM_SQL_PROFILE);
+        END_TIMER('Stark__ORM get', self::$_SQL_PROFILE);
         return ( ! $cols_from_array && count($return_ary) == 1 ) ? $return_ary[0] : $return_ary;
     }
 
@@ -465,9 +560,9 @@ class Stark__ORM {
      * @see set_and_save()
      */
     public function set($to_set) {
-        if ( isset( $this->__object_forward ) ) return $this->do_object_forward_method();
+        if ( $this->__object_forward !== null ) return $this->do_object_forward_method(__FUNCTION__);
         $caller_funcs_to_ignore = array('set','set_and_save','__set','__unset','exists','call_user_func_array','do_object_forward_method');
-        START_TIMER('Stark__ORM set', ORM_SQL_PROFILE);
+        START_TIMER('Stark__ORM set', self::$_SQL_PROFILE);
 
         if ( ! is_array($to_set) ) die("You must pass set() an array!");
         
@@ -498,11 +593,11 @@ class Stark__ORM {
             $this->__data[ $col ] = $to_set[ $col ];
         }
  
-        END_TIMER('Stark__ORM set', ORM_SQL_PROFILE);
+        END_TIMER('Stark__ORM set', self::$_SQL_PROFILE);
         return true;
     }
     public function remember_old_values($set = null) {
-		if ( isset( $this->__object_forward ) ) return $this->do_object_forward_method();
+		if ( $this->__object_forward !== null ) return $this->do_object_forward_method(__FUNCTION__);
 		if ( is_null($set) ) { return( $this->__remember_old_values ); }
 		else { $this->__remember_old_values = $set; return $this->__remember_old_values; }
 	}
@@ -510,27 +605,27 @@ class Stark__ORM {
      * unsaved_columns() - Get a quick list of the cols that have been locally {@link set()}, but not yet saved using {@link save()}
      */
     public function unsaved_columns() {
-        if ( isset( $this->__object_forward ) ) return $this->do_object_forward_method();
+        if ( $this->__object_forward !== null ) return $this->do_object_forward_method(__FUNCTION__);
         return $this->__columns_to_save;
     }
 
     public function column_has_changed( $col ) {
-        if ( isset( $this->__object_forward ) ) return $this->do_object_forward_method();
+        if ( $this->__object_forward !== null ) return $this->do_object_forward_method(__FUNCTION__);
         return( isset( $this->__data['__old__'] ) && array_key_exists( $col, $this->__data['__old__'] ) && array_key_exists(  $col, $this->__data )
                 && (   $this->__data['__old__'][ $col ] != $this->__data[ $col ] ) ? true : false
                 );
     }
 
     public function get_table() {
-        if ( isset( $this->__object_forward ) ) return $this->do_object_forward_method();
+        if ( $this->__object_forward !== null ) return $this->do_object_forward_method(__FUNCTION__);
         return $this->__table;
     }
     public function get_primary_key() {
-        if ( isset( $this->__object_forward ) ) return $this->do_object_forward_method();
+        if ( $this->__object_forward !== null ) return $this->do_object_forward_method(__FUNCTION__);
         return $this->__primary_key;
     }
     public function get_relations() {
-        if ( isset( $this->__object_forward ) ) return $this->do_object_forward_method();
+        if ( $this->__object_forward !== null ) return $this->do_object_forward_method(__FUNCTION__);
         return $this->__relations;
     }
 
@@ -542,7 +637,7 @@ class Stark__ORM {
      * save() - Take all the columns set locally, and send an UPDATE to the database
      */
     public function save() {
-        if ( isset( $this->__object_forward ) ) return $this->do_object_forward_method();
+        if ( $this->__object_forward !== null ) return $this->do_object_forward_method(__FUNCTION__);
         $caller_funcs_to_ignore = array('save','set_and_save','exists','call_user_func_array','do_object_forward_method');
 
         ###  Must be installed and active
@@ -592,7 +687,7 @@ class Stark__ORM {
      * get_relation() - Directly get a relation, can also be done with get()
      */
     public function get_relation($name, $force_ordered_list = true) {
-        if ( isset( $this->__object_forward ) ) return $this->do_object_forward_method();
+        if ( $this->__object_forward !== null ) return $this->do_object_forward_method(__FUNCTION__);
         $caller_funcs_to_ignore = array('get_relation','get','__get','__isset','set','__set','__unset','exists','call_user_func_array','do_object_forward_method');
 
 #        ###  Must be installed and active
@@ -613,24 +708,24 @@ class Stark__ORM {
 
         ###  Relationship types
         if ( $rel['relationship'] == 'has_one' ) {
-            START_TIMER('Stark__ORM get_relationship has_one', ORM_SQL_PROFILE);
+            START_TIMER('Stark__ORM get_relationship has_one', self::$_SQL_PROFILE);
             ###  Read the 'columns' definition
             $rel_pk_values = array();
             $are_null_values = false;
             foreach ( (array) $rel['columns'] as $col ) { if (( $rel_pk_values[] = $this->get($col)            ) === null) $are_null_values = true; } 
         
             ###  Can't do this type with NULL values
-            if ( $are_null_values ) { END_TIMER('Stark__ORM get_relationship has_one', ORM_SQL_PROFILE);  return null; }
+            if ( $are_null_values ) { END_TIMER('Stark__ORM get_relationship has_one', self::$_SQL_PROFILE);  return null; }
 
             $class = $rel['class'];
             if ( ! class_exists($class) ) require_once( $this->include_prefix() . $rel['include']);
 
             $this->__relation_data[$name] = new $class ($rel_pk_values, null, $this->__dbh);
 
-            END_TIMER('Stark__ORM get_relationship has_one', ORM_SQL_PROFILE);
+            END_TIMER('Stark__ORM get_relationship has_one', self::$_SQL_PROFILE);
         }
         else if ( $rel['relationship'] == 'has_many' ) {
-            START_TIMER('Stark__ORM get_relationship has_many', ORM_SQL_PROFILE);
+            START_TIMER('Stark__ORM get_relationship has_many', self::$_SQL_PROFILE);
             
             ###  Read the 'foreign_key_columns' definition
             $rel_pk_values = array();
@@ -685,17 +780,36 @@ class Stark__ORM {
 
             $this->__relation_data[$name] = $obj_list;
 
-            END_TIMER('Stark__ORM get_relationship has_many', ORM_SQL_PROFILE);
+            END_TIMER('Stark__ORM get_relationship has_many', self::$_SQL_PROFILE);
         }
         else if ( $rel['relationship'] == 'many_to_many' ) {
-            START_TIMER('Stark__ORM get_relationship many_to_many', ORM_SQL_PROFILE);
+            START_TIMER('Stark__ORM get_relationship many_to_many', self::$_SQL_PROFILE);
             
             ###  Read the 'foreign_key_columns' definition
             $rel_pk_values = array();
             $are_null_values = false;
 
-            if ( is_array($rel['foreign_table_pkey']) ) { $foreign_pkey =        $rel['foreign_table_pkey']; }
-            else                                        { $foreign_pkey = array( $rel['foreign_table_pkey'] ); }
+			$ft_join_clause = 'USING';
+			$using_clause = array();
+			$on_clause    = array();
+			$foreign_pkey = array();
+			foreach ( (array) $rel['foreign_table_pkey'] as $key => $col ) {
+				$foreign_pkey[] = $col;
+				if ( is_int($key) ) {
+					$using_clause[] = $col;
+					$on_clause[]    = "jt.$col = ft.$col";
+				}
+				else {
+					$ft_join_clause = 'ON';
+					$on_clause[]    = "jt.$key = ft.$col";
+				}
+			}
+			
+			###  If the column names in the Join table aren't the same as they are in my table
+			$pkey_columns_in_join_table = $this->__primary_key;
+			if ( ! empty( $rel['pkey_columns_in_join_table'] ) ) {
+				$pkey_columns_in_join_table = (array) $rel['pkey_columns_in_join_table'];
+			}
 
             ###  If there are any 'join_table_fixed_values'
             $join_table_fixed_values = array();
@@ -713,14 +827,14 @@ class Stark__ORM {
 				$data = call_user_func_array($hook, array($rel));
 			} else {
 				$values = array();
-				$where = array();  foreach ($this->__pk_values         as $col => $val) { $where[] = "jt.$col = ?";  $values[] = $val; }
+ 				$where = array();  foreach ($pkey_columns_in_join_table as $i => $col) { $where[] = "jt.$col = ?";  $values[] = $this->__pk_values[$this->__primary_key[$i]]; }
 				foreach                    ($join_table_fixed_values as $col => $val) { $where[] = "jt.$col = ?";  $values[] = $val; }
 				if ( ! empty($rel['custom_where_clause']) )        $where[] = $rel['custom_where_clause'];
 				if ( isset($rel['change_status_instead_of_delete'])
 					 && $rel['change_status_instead_of_delete']  ) $where[] = "jt.status = 'active'";
 				$sql = "SELECT ft.*
                       FROM ". $rel['join_table'] ." jt 
-                      JOIN ". $rel['foreign_table'] ." ft USING(". join(', ', $foreign_pkey) .") 
+                      JOIN ". $rel['foreign_table'] ." ft ". $ft_join_clause ."(". ( $ft_join_clause == 'USING' ? join(', ', $using_clause) : join(' AND ', $on_clause) ) .") 
                       ". ((! empty($where)                  ) ? "WHERE ". join(' AND ', $where)      : "") ."
                       ". ((! empty($rel['order_by_clause']) ) ? "ORDER BY ". $rel['order_by_clause'] : "") ."
                       "; # " DUMB emacs PHP syntax hiliting
@@ -741,7 +855,7 @@ class Stark__ORM {
 
             $this->__relation_data[$name] = $obj_list;
 
-            END_TIMER('Stark__ORM get_relationship many_to_many', ORM_SQL_PROFILE);
+            END_TIMER('Stark__ORM get_relationship many_to_many', self::$_SQL_PROFILE);
         }
         else {
             ###  Error if they use an invalid relationship type
@@ -759,7 +873,7 @@ class Stark__ORM {
      * $pkey - an array of the primary key values of the other object
      */
     public function has_relation($relation, $pkey) {
-        if ( isset( $this->__object_forward ) ) return $this->do_object_forward_method();
+        if ( $this->__object_forward !== null ) return $this->do_object_forward_method(__FUNCTION__);
         $caller_funcs_to_ignore = array('set_complete_relation', 'get_relation','get','__get','__isset','set','__set','__unset','exists','call_user_func_array','do_object_forward_method');
         ###  Must be many to many
         if ( $this->__relations[$relation]['relationship'] != 'many_to_many' )  {
@@ -781,16 +895,25 @@ class Stark__ORM {
      * $pkey - an array of the primary key values of the other object
      */
     public function add_relation($relation, $pkey) {
-        if ( isset( $this->__object_forward ) ) return $this->do_object_forward_method();
+        if ( $this->__object_forward !== null ) return $this->do_object_forward_method(__FUNCTION__);
         if($this->has_relation($relation, $pkey)) return true;
         
-        if(!is_array($pkey)) $pkey = array($pkey);
-        $relation_key = join('||--||',$pkey);
+#        bug('Didnt have relation in'. get_class($this) .'->'. $relation, $pkey, array_keys((array) $this->__relation_data[$relation]));
+        
+		###  Update relation_data so that further has_relation() calls are already cached
+        $relation_key = join('||--||',(array) $pkey);
         $rel = &$this->__relations[$relation];
         $class = $rel['class'];
         $this->__relation_data[$relation][$relation_key] = new $class ($pkey, null, $this->__dbh);
-        if ( is_array($rel['foreign_table_pkey']) ) { $foreign_pkey =        $rel['foreign_table_pkey']; }
-        else                                        { $foreign_pkey = array( $rel['foreign_table_pkey'] ); }
+        $foreign_pkey = (array) $rel['foreign_table_pkey'];
+        
+		$pkey = (array) $pkey;
+
+		###  If the column names in the Join table aren't the same as they are in my table
+		$pkey_columns_in_join_table = $this->__primary_key;
+		if ( ! empty( $rel['pkey_columns_in_join_table'] ) ) {
+			$pkey_columns_in_join_table = (array) $rel['pkey_c/olumns_in_join_table'];
+		}
         
         ###  If there are any 'join_table_fixed_values'
         $join_table_fixed_values = array();
@@ -800,8 +923,14 @@ class Stark__ORM {
             
         if ( is_null( $this->__dbh ) ) $this->load_dbh();
         $fields = array(); $q_marks = array(); $values = array();
-        foreach( $this->__primary_key       as         $pk ) { $fields[] = $pk;  $q_marks[] = "?"; $values[] = $this->__pk_values[$pk];}
-        foreach( $foreign_pkey            as $i   => $pk ) { $fields[] = $pk;  $q_marks[] = "?"; $values[] = array_key_exists($pk,$pkey)?$pkey[$pk]:$pkey[$i];}
+        foreach( $pkey_columns_in_join_table as $i   => $pk    ) { $fields[] = $pk;  $q_marks[] = "?"; $values[] = $this->__pk_values[$this->__primary_key[$i]];}
+        foreach( array_keys($foreign_pkey)   as $i   => $jt_pk ) {
+			###  Handle custom col name for jt.<foreign pkey>, where
+			###    The key of the column is the join table column
+			$fields[] = is_int($jt_pk) ? $foreign_pkey[$jt_pk] : $jt_pk;
+			$q_marks[] = "?";
+			$values[] = array_key_exists($foreign_pkey[$jt_pk],$pkey) ? $pkey[$foreign_pkey[$jt_pk]] : $pkey[$i];
+		}
         foreach( $join_table_fixed_values as $col => $val) { $fields[] = $col; $q_marks[] = "?"; $values[] = $val;}
         $sql = "INSERT INTO ". $rel['join_table'] ." (". join(',',$fields) .") 
                 VALUES (". join(',', $q_marks).") ";
@@ -819,15 +948,13 @@ class Stark__ORM {
      * $pkey - an array of the primary key values of the other object
      */
     public function remove_relation($relation, $pkey) {
-        if ( isset( $this->__object_forward ) ) return $this->do_object_forward_method();
+        if ( $this->__object_forward !== null ) return $this->do_object_forward_method(__FUNCTION__);
         if(!$this->has_relation($relation, $pkey)) return true;
         
-        if(!is_array($pkey)) $pkey = array($pkey);
-        $relation_key = join('||--||',$pkey);
+        $relation_key = join('||--||',(array) $pkey);
         $rel = &$this->__relations[$relation];
         unset($this->__relation_data[$relation][$relation_key]);
-        if ( is_array($rel['foreign_table_pkey']) ) { $foreign_pkey =        $rel['foreign_table_pkey']; }
-        else                                        { $foreign_pkey = array( $rel['foreign_table_pkey'] ); }
+        $foreign_pkey = (array) $rel['foreign_table_pkey'];
         
         ###  If there are any 'join_table_fixed_values'
         $join_table_fixed_values = array();
@@ -835,10 +962,21 @@ class Stark__ORM {
             $join_table_fixed_values = $rel['join_table_fixed_values'];
         }
             
+		###  If the column names in the Join table aren't the same as they are in my table
+		$pkey_columns_in_join_table = $this->__primary_key;
+		if ( ! empty( $rel['pkey_columns_in_join_table'] ) ) {
+			$pkey_columns_in_join_table = (array) $rel['pkey_columns_in_join_table'];
+		}
+            
         ###  Assemble the WHERE clause
         $values = array();
-        $where = array();  foreach ($this->__pk_values         as $col => $val) { $where[] = "$col = ?";               $values[] = $val; }
-        foreach                    ($pkey                    as $i   => $val) { $where[] = $foreign_pkey[$i]." = ?"; $values[] = $val; }
+		$where = array();  foreach ($pkey_columns_in_join_table as $i   => $col) { $where[] = "$col = ?";  $values[] = $this->__pk_values[$this->__primary_key[$i]]; }
+        foreach( array_keys($foreign_pkey)   as $i   => $jt_pk ) {
+			###  Handle custom col name for jt.<foreign pkey>, where
+			###    The key of the column is the join table column
+			$where[] = (is_int($jt_pk) ? $foreign_pkey[$jt_pk] : $jt_pk)." = ?"; 
+			$values[] = array_key_exists($foreign_pkey[$jt_pk],$pkey) ? $pkey[$foreign_pkey[$jt_pk]] : $pkey[$i];
+		}
         foreach                    ($join_table_fixed_values as $col => $val) { $where[] = "$col = ?";               $values[] = $val; }
         if ( ! empty($rel['custom_where_clause']) ) $where[] = $rel['custom_where_clause'];
 
@@ -873,7 +1011,7 @@ class Stark__ORM {
      * $pkeys - an array of the primary key values of the other objects
      */
     public function set_complete_relation($relation, $pkeys) {
-        if ( isset( $this->__object_forward ) ) return $this->do_object_forward_method();
+        if ( $this->__object_forward !== null ) return $this->do_object_forward_method(__FUNCTION__);
 
         ###  This call is expensive enough, clear relation cache before to assure reliability...
         unset($this->__relation_data[$relation]);
@@ -909,7 +1047,7 @@ class Stark__ORM {
      * $pkeys - an array of the primary key values of the other objects
      */
     public function get_complete_relation($relation) {
-#        if ( isset( $this->__object_forward ) ) return $this->do_object_forward_method();
+#        if ( $this->__object_forward !== null ) return $this->do_object_forward_method(__FUNCTION__);
         
         $relations = $this->get_relation($relation, false);
         if ( empty( $relations ) ) return( array() );
@@ -919,9 +1057,11 @@ class Stark__ORM {
      * clear_relation_cache() - clear just relation cache, but not column data
      */
     public function clear_relation_cache() {
-        if ( isset( $this->__object_forward ) ) return $this->do_object_forward_method();
+        if ( $this->__object_forward !== null ) return $this->do_object_forward_method(__FUNCTION__);
+        START_TIMER('Stark__ORM clear_relation_cache()', self::$_SQL_PROFILE);
         $this->post_clear_relation_cache_handler();
-        return $this->__relation_data = array();
+        $this->__relation_data = array();
+        END_TIMER('Stark__ORM clear_relation_cache()', self::$_SQL_PROFILE);
     }
     /** 
      * post_clear_relation_cache_handler() - To be overridden by child-classes that have their own local caching
@@ -954,7 +1094,7 @@ class Stark__ORM {
      */
     public function create($to_set = array()) {
         global $Stark__ORM_OBJECT_CACHE;
-        if ( isset( $this->__object_forward ) ) return $this->do_object_forward_method();
+        if ( $this->__object_forward !== null ) return $this->do_object_forward_method(__FUNCTION__);
         $caller_funcs_to_ignore = array('create','exists','set','set_and_save','call_user_func_array','do_object_forward_method');
     
         ###  Must be not installed
@@ -1030,7 +1170,7 @@ class Stark__ORM {
      * get_all() - Quick get all columns
      */
 	public function get_all() {
-        if ( isset( $this->__object_forward ) ) return $this->do_object_forward_method();
+        if ( $this->__object_forward !== null ) return $this->do_object_forward_method(__FUNCTION__);
 
 		$data = array();
 		foreach ( $this->__schema as $col => $x ) { $data[$col] = $this->get($col); }
@@ -1041,7 +1181,7 @@ class Stark__ORM {
      * clone() - Quick copy of all (currently-set) data in a ready-to-create un-installed object of the same class
      */
 	public function clone_row() {
-        if ( isset( $this->__object_forward ) ) return $this->do_object_forward_method();
+        if ( $this->__object_forward !== null ) return $this->do_object_forward_method(__FUNCTION__);
 
 		$class = get_class($this);
 		$my_clone = new $class(array(), null, $this->__dbh);
@@ -1064,7 +1204,7 @@ class Stark__ORM {
      */
     public function delete() {
         global $Stark__ORM_OBJECT_CACHE;
-        if ( isset( $this->__object_forward ) ) return $this->do_object_forward_method();
+        if ( $this->__object_forward !== null ) return $this->do_object_forward_method(__FUNCTION__);
         $caller_funcs_to_ignore = array('delete','exists','call_user_func_array','do_object_forward_method');
     
         ###  Must be installed and active
@@ -1113,8 +1253,8 @@ class Stark__ORM {
     ###  Pre-Cache Sub-Relations
     
     ###  Need to expose some internals for this..
-    protected function __relations() { if ( isset( $this->__object_forward ) ) return $this->do_object_forward_method();  return $this->__relations; }
-    protected function __schema()    { if ( isset( $this->__object_forward ) ) return $this->do_object_forward_method();  return $this->__schema; }
+    protected function __relations() { if ( $this->__object_forward !== null ) return $this->do_object_forward_method(__FUNCTION__);  return $this->__relations; }
+    protected function __schema()    { if ( $this->__object_forward !== null ) return $this->do_object_forward_method(__FUNCTION__);  return $this->__schema; }
 
     /**
      * pre_load_sub_relations() - Acts like get_relation(), but pre-load sub-object's in one query (for "has_many" relations only)
@@ -1132,7 +1272,7 @@ class Stark__ORM {
      *
      */
     public function pre_load_sub_relations( $name, $sub_relations_to_load, $force_ordered_list = true ) {
-        if ( isset( $this->__object_forward ) ) return $this->do_object_forward_method();
+        if ( $this->__object_forward !== null ) return $this->do_object_forward_method(__FUNCTION__);
         $caller_funcs_to_ignore = array('pre_load_sub_relations','get','__get','__isset','set','__set','__unset','exists','call_user_func_array','do_object_forward_method');
 
         ###  Must be installed and active
@@ -1157,7 +1297,7 @@ class Stark__ORM {
             return false;
         }
 
-        START_TIMER('Stark__ORM get_relationship has_many (pre_load_sub)', ORM_SQL_PROFILE);
+        START_TIMER('Stark__ORM get_relationship has_many (pre_load_sub)', self::$_SQL_PROFILE);
             
         ###  Read the 'foreign_key_columns' definition
         $rel_pk_values = array();
@@ -1235,7 +1375,7 @@ class Stark__ORM {
 
         $this->__relation_data[$name] = $obj_list;
 
-        END_TIMER('Stark__ORM get_relationship has_many (pre_load_sub)', ORM_SQL_PROFILE);
+        END_TIMER('Stark__ORM get_relationship has_many (pre_load_sub)', self::$_SQL_PROFILE);
         
         ###  Force Ordered array, to hide the 'many_to_many' keyed indexes except when (we) or others want them
         return( $force_ordered_list && is_array( $this->__relation_data[$name] ) ? array_values( $this->__relation_data[$name] ) : $this->__relation_data[$name] );
@@ -1285,22 +1425,22 @@ class Stark__ORM {
     
     ###  These just use get() and set()
 	public function __get($name) {
-		if ( isset( $this->__object_forward ) ) return $this->do_object_forward_method();
+		if ( $this->__object_forward !== null ) return $this->do_object_forward_method(__FUNCTION__);
 		if ( isset( $this->__schema[$name] ) || isset( $this->__relations[$name] ) )   return $this->get($name);
-		else return $this->$name; // allow user-set parameters, but on the Singleton object
+		else if ( isset( $this->$name ) ) return $this->$name; // allow user-set parameters, but on the Singleton object
 	}
     public function __set($name, $value) {
-		if ( isset( $this->__object_forward ) ) return $this->do_object_forward_method();
+		if ( $this->__object_forward !== null ) return $this->do_object_forward_method(__FUNCTION__);
 		if ( isset( $this->__schema[$name] ) || isset( $this->__relations[$name] ) )  return $this->set(array($name => $value));
 		else return( $this->$name = $value ); // allow user-set parameters, but on the Singleton object
 	}
     public function __isset($name) {
-		if ( isset( $this->__object_forward ) ) return $this->do_object_forward_method();
+		if ( $this->__object_forward !== null ) return $this->do_object_forward_method(__FUNCTION__);
 		if ( isset( $this->__schema[$name] ) || isset( $this->__relations[$name] ) )  return( ! is_null($this->get($name)) );
 		else return( isset( $this->$name ) ); // allow user-set parameters, but on the Singleton object
 	}
 	public function __unset($name) {
-		if ( isset( $this->__object_forward ) ) return $this->do_object_forward_method();
+		if ( $this->__object_forward !== null ) return $this->do_object_forward_method(__FUNCTION__);
 		if ( isset( $this->__schema[$name] ) || isset( $this->__relations[$name] ) )  return( $this->set(array($name => null)) );
 		else unset( $this->$name ); // allow user-set parameters, but on the Singleton object
 	}
@@ -1310,16 +1450,22 @@ class Stark__ORM {
     ###  Object Forwarding
 
     public function __call($name, $args){
-        if ( isset( $this->__object_forward ) ) return $this->do_object_forward_method($name);
+        if ( $this->__object_forward !== null ) return $this->do_object_forward_method($name);
         
         trigger_error( 'Call to undefined method '. get_class($this) .'::'. $name . ' in '. trace_blame_line(array('__call','do_object_forward_method')), E_USER_ERROR);
         return false;
     }
     protected function do_object_forward_method($method_name = null) {
-        $trace = debug_backtrace();
-        if ( ! isset( $method_name ) ) $method_name = $trace[1]['function'];
-        $obj = $this->__object_forward;
-        return call_user_func_array(array(&$this->__object_forward, $method_name), $trace[1]['args']);
+		$trace = debug_backtrace();
+        if ( ! isset( $method_name ) ) {
+			$method_name = $trace[1]['function'];
+		}
+		if ( ! isset( self::$__OBJECT_CACHE[ $this->__dbh ][$this->__cache_key] ) ) {
+			trace_dump();
+			bug( "ERROR: Tried to forward to an already-garbage-collected object.  Ref-count:", self::$__OBJECT_REFCOUNT[ $this->__dbh ][$this->__cache_key], $this->__dbh, $this->__object_forward, $this->__cache_key );
+			exit;
+		}
+        return call_user_func_array(array(&self::$__OBJECT_CACHE[ $this->__dbh ][$this->__cache_key], $method_name), $trace[1]['args']);
     }
 
 
@@ -1393,7 +1539,7 @@ class Stark__ORM {
      *
      */
     public function validate($form = null) {
-        if ( isset( $this->__object_forward ) ) return $this->do_object_forward_method();
+        if ( $this->__object_forward !== null ) return $this->do_object_forward_method(__FUNCTION__);
         $tmp = func_get_args();  $tmp[] = $this->__schema;  return call_user_func_array( 'validate', $tmp );
     }
 
@@ -1412,7 +1558,7 @@ class Stark__ORM {
      * @param mixed  $value   The value to be tested
      */
     public function extract_and_validate($form = null) {
-        if ( isset( $this->__object_forward ) ) return $this->do_object_forward_method();
+        if ( $this->__object_forward !== null ) return $this->do_object_forward_method(__FUNCTION__);
         $tmp = func_get_args();  $tmp[] = $this->__schema;  return call_user_func_array( 'extract_and_validate', $tmp );
     }
 
@@ -1425,7 +1571,7 @@ class Stark__ORM {
      * @param mixed  $value   The value to be tested
      */
     public function validate_column_value($col, $value) {
-        if ( isset( $this->__object_forward ) ) return $this->do_object_forward_method();
+        if ( $this->__object_forward !== null ) return $this->do_object_forward_method(__FUNCTION__);
         return validate_column_value($col, $value, $this->__schema);
     }
 
@@ -1439,15 +1585,15 @@ class Stark__ORM {
 	 */
 	function dbh_query_bind( $sql ) {
 	    $use_dbh = $this->dbh();
-	    if ( ORM_SQL_PROFILE ) START_TIMER('dbh_query_bind');
+	    if ( self::$_SQL_PROFILE ) START_TIMER('dbh_query_bind');
 	    $bind_params = array_slice( func_get_args(), 1 );
 	    ###  Allow params passed in an array or as args
 	    if ( is_a( $bind_params[ count($bind_params) - 1 ], 'PDO' ) || is_a( $bind_params[ count($bind_params) - 1 ], 'PhoneyPDO' ) ) $use_dbh = array_pop($bind_params);
 	    if ( count( $bind_params ) == 1 && ( $tmp = array_values($bind_params) ) && is_array($tmp[0]) ) { $bind_params = $tmp[0]; };
 	    $this->reverse_t_bools($bind_params);
-	    if (ORM_SQL_DEBUG) trace_dump();
-	    if (ORM_SQL_DEBUG) bug($sql, $bind_params);
-	    $GLOBALS['ORM_SQL_LOG'][] = array(microtime(true), $sql, $bind_params);
+	    if (self::$_SQL_DEBUG) trace_dump();
+	    if (self::$_SQL_DEBUG) bug($sql, $bind_params);
+	    self::$__SQL_LOG[] = array(microtime(true), $sql, $bind_params);
 	    try { 
 	        $sth = $use_dbh->prepare($sql);
 	        $rv = $sth->execute($bind_params);
@@ -1461,7 +1607,7 @@ class Stark__ORM {
 	        trigger_error( 'There was an error running a SQL statement, ['. $sql .'] with ('. join(',',$bind_params) .'): '. $e->getMessage() .' in ' . trace_blame_line(), E_USER_ERROR);
 	        return false;
 	    }
-	    if ( ORM_SQL_PROFILE ) END_TIMER('dbh_query_bind');
+	    if ( self::$_SQL_PROFILE ) END_TIMER('dbh_query_bind');
 	    return $sth;
 	}
 	/**
@@ -1473,15 +1619,15 @@ class Stark__ORM {
 	 */
 	function dbh_do_bind( $sql ) {
 	    $use_dbh = $this->dbh();
-	    if ( ORM_SQL_PROFILE ) START_TIMER('dbh_do_bind');
+	    if ( self::$_SQL_PROFILE ) START_TIMER('dbh_do_bind');
 	    $bind_params = array_slice( func_get_args(), 1 );
 	    ###  Allow params passed in an array or as args
 	    if ( is_a( $bind_params[ count($bind_params) - 1 ], 'PDO' ) || is_a( $bind_params[ count($bind_params) - 1 ], 'PhoneyPDO' ) ) $use_dbh = array_pop($bind_params);
 	    if ( count( $bind_params ) == 1 && is_array(array_shift(array_values($bind_params))) ) { $bind_params = array_shift(array_values($bind_params)); };
 	    
 	    $this->reverse_t_bools($bind_params);
-	    if (ORM_SQL_DEBUG || ORM_SQL_WRITE_DEBUG) bug($sql, $bind_params);
-	    $GLOBALS['ORM_SQL_LOG'][] = array(microtime(true), $sql, $bind_params);
+	    if (self::$_SQL_DEBUG || self::$_SQL_WRITE_DEBUG) bug($sql, $bind_params);
+	    self::$__SQL_LOG[] = array(microtime(true), $sql, $bind_params);
 	    try { 
 	        $sth = $use_dbh->prepare($sql);
 	        $rv = $sth->execute($bind_params);
@@ -1495,7 +1641,7 @@ class Stark__ORM {
 	        trigger_error( 'There was an error running a SQL statement, ['. $sql .'] with ('. join(',',$bind_params) .'): '. $e->getMessage() .' in ' . trace_blame_line(), E_USER_ERROR);
 	        return false;
 	    }
-	    if ( ORM_SQL_PROFILE ) END_TIMER('dbh_do_bind');
+	    if ( self::$_SQL_PROFILE ) END_TIMER('dbh_do_bind');
 	    return $rv;
 	}
 	function reverse_t_bools(&$ary) { if (! is_array($ary)) return;  foreach($ary as $k => $v) { if ($v === true) $ary[$k] = 't';  if ($v === false) $ary[$k] = 'f'; } }
